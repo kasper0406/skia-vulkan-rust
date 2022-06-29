@@ -313,6 +313,7 @@ fn main() {
 
     let mut skia_context = skia_safe::gpu::DirectContext::new_vulkan(&skia_backend, None).unwrap();
 
+    let sample_count = 4;
     let skia_targets: Vec<_> = {
         let skia_image_info = skia_safe::ImageInfo::new(
             dimensions,
@@ -326,7 +327,7 @@ fn main() {
                     &mut skia_context,
                     skia_safe::Budgeted::Yes,
                     &skia_image_info,
-                    Some(8), // Sample count
+                    Some(sample_count),
                     skia_safe::gpu::SurfaceOrigin::TopLeft,
                     None, // Surface props
                     false
@@ -354,11 +355,15 @@ fn main() {
         (image_available_semaphores, render_finished_semaphorese)
     };
 
-    let mut degrees = 0.0;
+    let start_time = std::time::Instant::now();
+
+    let fps_report_interval = std::time::Duration::from_secs_f32(1.0);
+    let mut last_fps_report_time = std::time::Instant::now();
+    let mut frame_counter = 0u64;
 
     let mut command_buffer_index: u32 = 0;
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        *control_flow = ControlFlow::Poll;
 
         match event {
             Event::WindowEvent {
@@ -387,6 +392,14 @@ fn main() {
                 }.unwrap();
                 let image = swapchain_images[present_index as usize];
 
+                frame_counter += 1;
+                if last_fps_report_time.elapsed() > fps_report_interval {
+                    let fps = (frame_counter as f32) / last_fps_report_time.elapsed().as_secs_f32();
+                    info!["FPS = {}", fps];
+                    last_fps_report_time = std::time::Instant::now();
+                    frame_counter = 0;
+                }
+
                 unsafe {
                     // Wait and reset
                     device.wait_for_fences(&[command_buffer_fence], true, std::u64::MAX).unwrap();
@@ -400,11 +413,15 @@ fn main() {
                     device.begin_command_buffer(command_buffer, &command_buffer_begin_info).unwrap();
                     
                     let mut canvas = skia_surface.canvas();
+                    canvas.save();
                     canvas.clear(skia_safe::Color4f::new(1.0, 1.0, 1.0, 1.0));
                     let paint = skia_safe::Paint::new(skia_safe::Color4f::new(1.0, 0.0, 0.0, 1.0), None);
-                    canvas.draw_circle(skia_safe::Point::new(200.0, 200.0), 100.0, &paint);
+
+                    let degrees = ((360.0f32 / 5.0f32) * start_time.elapsed().as_secs_f32()) % 360.0;
                     canvas.rotate(degrees, Some(skia_safe::Point::new(300.0, 300.0)));
-                    degrees = (degrees + 0.01) % 360.0;
+
+                    canvas.draw_circle(skia_safe::Point::new(200.0, 200.0), 100.0, &paint);
+                    canvas.restore();
 
                     skia_surface.flush_and_submit();
 
@@ -420,11 +437,6 @@ fn main() {
                             .layer_count(1)
                             .build())
                         .build();
-
-                    device.cmd_pipeline_barrier(command_buffer,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(), &[], &[], &[skia_barrier]);
 
                     let barrier_test = vk::ImageMemoryBarrier::builder()
                         .image(image)
@@ -442,7 +454,7 @@ fn main() {
                     device.cmd_pipeline_barrier(command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(), &[], &[], &[barrier_test]);
+                        vk::DependencyFlags::empty(), &[], &[], &[skia_barrier, barrier_test]);
                     
                     device.cmd_copy_image(command_buffer, *skia_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                             image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[
