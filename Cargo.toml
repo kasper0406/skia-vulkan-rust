@@ -3,13 +3,16 @@ name = "skia-vulkan"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+crate-type = ["lib"]
+bench = false
+
+[[bin]]
+name = "example"
+test = false
+bench = false
 
 [dependencies]
-#vulkano =  "0"
-#vulkano-shaders = "0"
-#vulkano-win = "0"
-#bytemuck = "1"
 skia-safe = { version = "0", features = ["vulkan"] }
 winit = "0"
 log = "0"
