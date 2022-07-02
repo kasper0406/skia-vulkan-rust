@@ -155,88 +155,105 @@ fn create_device(instance: &ash::Instance, physical_device: &PhysicalDevice, que
     }.unwrap()
 }
 
+enum WindowManager {
+    Windows,
+    Wayland,
+    Xlib,
+    Android,
+    Macos,
+    Ios
+}
+
+impl WindowManager {
+    fn get_platform_window_manager() -> WindowManager {
+        #[cfg(target_os = "windows")]
+        return WindowManager::Windows;
+
+        #[cfg(
+            all(
+                feature = "wayland",
+                any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd"
+                )
+            )
+        )]
+        return WindowManager::Wayland;
+
+        #[cfg(
+            all(
+                feature = "x11",
+                any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd"
+                )
+            )
+        )]
+        return WindowManager::X11;
+
+        #[cfg(any(target_os = "android"))]
+        return WindowManager::Android;
+
+        #[cfg(any(target_os = "macos"))]
+        return WindowManager::Macos;
+
+        #[cfg(any(target_os = "ios"))]
+        return WindowManager::Ios;
+    }
+}
+
 pub fn enumerate_required_extensions() -> Vec<*const std::os::raw::c_char> {
-    #[cfg(target_os = "windows")]
-    {
-        const WINDOWS_EXTS: [*const std::os::raw::c_char; 2] = [
-            ash::extensions::khr::Surface::name().as_ptr(),
-            ash::extensions::khr::Win32Surface::name().as_ptr(),
-        ];
-        return WINDOWS_EXTS.to_vec();
-    }
-
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    ))]
-    {
-        const WAYLAND_EXTS: [*const std::os::raw::c_char; 2] = [
-            ash::extensions::khr::Surface::name().as_ptr(),
-            ash::extensions::khr::WaylandSurface::name().as_ptr(),
-        ];
-        return WAYLAND_EXTS.to_vec();
-    }
-
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    ))]
-    {
-        const XLIB_EXTS: [*const std::os::raw::c_char; 2] = [
-            ash::extensions::khr::Surface::name().as_ptr(),
-            ash::extensions::khr::XlibSurface::name().as_ptr(),
-        ];
-        return XLIB_EXTS.to_vec();
-    }
-
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    ))]
-    {
-        const XCB_EXTS: [*const std::os::raw::c_char; 2] = [
-            ash::extensions::khr::Surface::name().as_ptr(),
-            ash::extensions::khr::XcbSurface::name().as_ptr(),
-        ];
-        return XCB_EXTS.to_vec();
-    }
-
-    #[cfg(any(target_os = "android"))]
-    {
-        const ANDROID_EXTS: [*const std::os::raw::c_char; 2] = [
-            ash::extensions::khr::Surface::name().as_ptr(),
-            ash::extensions::khr::AndroidSurface::name().as_ptr(),
-        ];
-        return ANDROID_EXTS.to_vec();
-    }
-
-    #[cfg(any(target_os = "macos"))]
-    {
-        const MACOS_EXTS: [*const std::os::raw::c_char; 3] = [
-            ash::extensions::khr::Surface::name().as_ptr(),
-            ash::extensions::ext::MetalSurface::name().as_ptr(),
-            KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
-        ];
-        return MACOS_EXTS.to_vec();
-    }
-
-    #[cfg(any(target_os = "ios"))]
-    {
-        const IOS_EXTS: [*const std::os::raw::c_char; 3] = [
-            ash::extensions::khr::Surface::name().as_ptr(),
-            ash::extensions::ext::MetalSurface::name().as_ptr(),
-            KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
-        ];
-        return IOS_EXTS.to_vec();
+    match WindowManager::get_platform_window_manager() {
+        WindowManager::Windows => {
+            const WINDOWS_EXTS: [*const std::os::raw::c_char; 2] = [
+                ash::extensions::khr::Surface::name().as_ptr(),
+                ash::extensions::khr::Win32Surface::name().as_ptr(),
+            ];
+            WINDOWS_EXTS.to_vec()
+        }
+        WindowManager::Wayland => {
+            const WAYLAND_EXTS: [*const std::os::raw::c_char; 2] = [
+                ash::extensions::khr::Surface::name().as_ptr(),
+                ash::extensions::khr::WaylandSurface::name().as_ptr(),
+            ];
+            WAYLAND_EXTS.to_vec()
+        }
+        WindowManager::Xlib => {
+            const XLIB_EXTS: [*const std::os::raw::c_char; 2] = [
+                ash::extensions::khr::Surface::name().as_ptr(),
+                ash::extensions::khr::XlibSurface::name().as_ptr(),
+            ];
+            XLIB_EXTS.to_vec()
+        }
+        WindowManager::Android => {
+            const ANDROID_EXTS: [*const std::os::raw::c_char; 2] = [
+                ash::extensions::khr::Surface::name().as_ptr(),
+                ash::extensions::khr::AndroidSurface::name().as_ptr(),
+            ];
+            ANDROID_EXTS.to_vec()
+        }
+        WindowManager::Macos => {
+            const MACOS_EXTS: [*const std::os::raw::c_char; 3] = [
+                ash::extensions::khr::Surface::name().as_ptr(),
+                ash::extensions::ext::MetalSurface::name().as_ptr(),
+                KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
+            ];
+            MACOS_EXTS.to_vec()
+        },
+        WindowManager::Ios => {
+            const IOS_EXTS: [*const std::os::raw::c_char; 3] = [
+                ash::extensions::khr::Surface::name().as_ptr(),
+                ash::extensions::ext::MetalSurface::name().as_ptr(),
+                KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
+            ];
+            IOS_EXTS.to_vec()
+        }
     }
 }
 

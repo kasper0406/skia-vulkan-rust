@@ -7,8 +7,6 @@ use winit::platform::run_return::EventLoopExtRunReturn;
 
 use log::{ info };
 
-use std::sync::Arc;
-
 fn main() {
     env_logger::init();
 
