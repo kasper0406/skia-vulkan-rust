@@ -1,5 +1,7 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::ffi::{ CStr, CString };
+use std::sync::Mutex;
 
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -88,7 +90,7 @@ struct PhysicalDevice {
     device_type: PhysicalDeviceType,
 }
 
-fn select_physical_device(instance: &ash::Instance, surface_loader: &ash::extensions::khr::Surface, surface: ash::vk::SurfaceKHR) -> Option<(PhysicalDevice, usize)> {
+fn select_physical_device(instance: &ash::Instance, surface_loader: &ash::extensions::khr::Surface, surfaces: &[ash::vk::SurfaceKHR]) -> Option<(PhysicalDevice, usize)> {
     unsafe {
         let physical_devices = instance.enumerate_physical_devices().unwrap();
         physical_devices.into_iter()
@@ -101,10 +103,11 @@ fn select_physical_device(instance: &ash::Instance, surface_loader: &ash::extens
                 queue_family_properties.iter().enumerate()
                         .filter_map(|(queue_family_index, queue_info)| {
                             let supports_graphics = queue_info.queue_flags.contains(vk::QueueFlags::GRAPHICS);
-                            let supports_surface = surface_loader.get_physical_device_surface_support(
-                                        physical_device, queue_family_index as u32, surface).unwrap();
-                            
-                            if supports_graphics && supports_surface {
+                            let supports_all_surfaces = surfaces.iter()
+                                .all(|surface| surface_loader.get_physical_device_surface_support(
+                                        physical_device, queue_family_index as u32, *surface).unwrap());
+
+                            if supports_graphics && supports_all_surfaces {
                                 let device = PhysicalDevice {
                                     handle: physical_device,
                                     device_type: physical_device_properties.device_type,
@@ -270,13 +273,12 @@ fn create_swapchain(
     instance: &ash::Instance, 
     physical_device: &PhysicalDevice,
     device: &ash::Device,
+    swapchain_loader: &Swapchain,
     surface_loader: &ash::extensions::khr::Surface,
     surface: vk::SurfaceKHR,
-    window_dimensions: (i32, i32)) -> (vk::SwapchainKHR, Vec<vk::Image>, Swapchain)
+    window_dimensions: (i32, i32)) -> (vk::SwapchainKHR, Vec<vk::Image>)
 {
     unsafe {
-        let swapchain_loader = Swapchain::new(&instance, &device);
-
         let present_modes = surface_loader
             .get_physical_device_surface_present_modes(physical_device.handle, surface)
             .unwrap();
@@ -320,10 +322,9 @@ fn create_swapchain(
             .build();
 
         let swapchain = swapchain_loader.create_swapchain(&swapchain_create_info, None).unwrap();
-
         let images = swapchain_loader.get_swapchain_images(swapchain).unwrap();
 
-        (swapchain, images, swapchain_loader)
+        (swapchain, images)
     }
 }
 
@@ -340,6 +341,7 @@ struct CommandBufferResources {
 pub struct VulkanInstance<'a> {
     vulkan_entry: Arc<ash::Entry>,
     instance: Arc<ash::Instance>,
+    surface_loader: ash::extensions::khr::Surface,
 
     skia_get_proc: Box<dyn skia_safe::gpu::vk::GetProc + 'a>,
 }
@@ -363,57 +365,117 @@ impl<'a> VulkanInstance<'a> {
             }
         });
 
+        let surface_loader = Surface::new(&vulkan_entry, &instance);
+
         VulkanInstance {
             vulkan_entry,
             instance,
+            surface_loader,
 
             skia_get_proc,
         }
     }
 }
 
-pub struct WindowRenderer<'a> {
+pub struct StaticWindowsResources<'a> {
     physical_device: PhysicalDevice,
     device: ash::Device,
     present_queue: ash::vk::Queue,
-    swapchain: ash::vk::SwapchainKHR,
-    swapchain_images: Vec<ash::vk::Image>,
+    queue_family_index: usize,
     swapchain_loader: Swapchain,
 
-    command_buffer_index: usize,
-    command_buffers: Vec<CommandBufferResources>,
+    // TODO(knielsen): Is there a way to get rid of this mutex?
+    //                 It should not be too bad, as the resources are only used for swapchain re-creation
+    skia_context: Arc<Mutex<skia_safe::gpu::DirectContext>>,
 
-    current_dimensions: (u32, u32),
-
-    skia_backend: skia_safe::gpu::vk::BackendContext<'a>,
-    skia_context: skia_safe::gpu::DirectContext,
+    window_resources: std::collections::HashMap<winit::window::WindowId, StaticWindowResources<'a>>,
 }
 
-const MAX_FRAMES_IN_FLIGHT: u32 = 2;
-impl<'a> WindowRenderer<'a> {
-    pub fn construct(vulkan: &'a VulkanInstance<'a>, window: &Window) -> WindowRenderer<'a> {
+impl<'a> StaticWindowsResources<'a> {
+    pub fn construct(vulkan: &'a VulkanInstance<'a>, windows: &'a [&Window]) -> StaticWindowsResources<'a> {
         let vulkan_entry = vulkan.vulkan_entry.clone();
         let instance = vulkan.instance.clone();
 
-        let surface = unsafe { ash_window::create_surface(&vulkan_entry, &instance, &window, None) }.unwrap();
-        let surface_loader = Surface::new(&vulkan_entry, &instance);
+        let surfaces: Vec<_> = windows.iter()
+            .map(|window| unsafe { ash_window::create_surface(&vulkan_entry, &instance, &window, None) }.unwrap())
+            .collect();
 
-        let (physical_device, queue_family_index) = select_physical_device(&instance, &surface_loader, surface).unwrap();
+        let (physical_device, queue_family_index) = select_physical_device(&instance, &vulkan.surface_loader, &surfaces).unwrap();
         info!["Selected physical device {} with queue family index {}", physical_device.name, queue_family_index];
 
         let device = create_device(&instance, &physical_device, queue_family_index);
+        let swapchain_loader = Swapchain::new(&instance, &device);
 
         let present_queue = unsafe { device.get_device_queue(queue_family_index as u32, 0) };
 
-        let window_dimension = window.inner_size();
+        // Skia
+        let skia_backend: skia_safe::gpu::vk::BackendContext<'a> = unsafe {
+            skia_safe::gpu::vk::BackendContext::new(
+                instance.handle().as_raw() as _,
+                physical_device.handle.as_raw() as _,
+                device.handle().as_raw() as _,
+                (
+                    present_queue.as_raw() as _,
+                    queue_family_index,
+                ),
+                &(vulkan.skia_get_proc)
+            )
+        };
 
-        let (swapchain, swapchain_images, swapchain_loader) = create_swapchain(
-            &instance, &physical_device, &device, &surface_loader, surface, window_dimension.into());
+        let window_resources: std::collections::HashMap<_, _> = std::iter::zip(windows.iter(), surfaces.into_iter())
+            .map(|(window, surface)| {
+                let static_window_resources = StaticWindowResources::create(window, &vulkan, &device, queue_family_index as u32, surface);
+                (window.id(), static_window_resources)
+            })
+            .collect();
 
+        let mut skia_context: skia_safe::gpu::DirectContext = skia_safe::gpu::DirectContext::new_vulkan(
+            &skia_backend, None).unwrap();
+
+        StaticWindowsResources {
+            physical_device,
+            device,
+            present_queue,
+
+            skia_context: Arc::new(Mutex::new(skia_context)),
+
+            window_resources,
+            queue_family_index,
+
+            swapchain_loader,
+        }
+    }
+
+    fn for_window(self: &Self, window: &Window) -> &StaticWindowResources<'a> {
+        self.window_resources.get(&window.id()).expect("Tried to use a window that was not registered for Skia!")
+    }
+}
+
+struct StaticWindowResources<'a> {
+    window: &'a Window,
+    command_buffers: Vec<vk::CommandBuffer>,
+    command_buffer_fences: Vec<vk::Fence>,
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    surface: ash::vk::SurfaceKHR,
+    queue_family_index: u32,
+}
+
+struct DynamicWindowResources<'a, T: 'a> {
+    swapchain: ash::vk::SwapchainKHR,
+    swapchain_images: Vec<ash::vk::Image>,
+    current_dimensions: (u32, u32),
+    command_buffers: Vec<CommandBufferResources>,
+
+    phantom: PhantomData<&'a T>,
+}
+
+impl<'a> StaticWindowResources<'a> {
+    fn create(window: &'a Window, vulkan: &VulkanInstance, device: &ash::Device, queue_family_index: u32, surface: ash::vk::SurfaceKHR) -> StaticWindowResources<'a> {
         let (command_buffers, command_buffer_fences) = {
             let pool_create_info = vk::CommandPoolCreateInfo::builder()
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                .queue_family_index(queue_family_index as u32)
+                .queue_family_index(queue_family_index)
                 .build();
 
             let pool = unsafe { device.create_command_pool(&pool_create_info, None).unwrap() };
@@ -437,22 +499,40 @@ impl<'a> WindowRenderer<'a> {
             (command_buffers, fences)
         };
 
-        // Skia
-        let skia_backend: skia_safe::gpu::vk::BackendContext<'a> = unsafe {
-            skia_safe::gpu::vk::BackendContext::new(
-                instance.handle().as_raw() as _,
-                physical_device.handle.as_raw() as _,
-                device.handle().as_raw() as _,
-                (
-                    present_queue.as_raw() as _,
-                    queue_family_index,
-                ),
-                &(vulkan.skia_get_proc)
-            )
+        let (image_available_semaphores, render_finished_semaphores) = {
+            let semaphore_create_info = vk::SemaphoreCreateInfo::default();
+            let image_available_semaphores: Vec<_> = command_buffers.iter()
+                .map(|_command_buffer| unsafe { device.create_semaphore(&semaphore_create_info, None) }.unwrap())
+                .collect();
+            let render_finished_semaphorese: Vec<_> = command_buffers.iter()
+                .map(|_command_buffer| unsafe { device.create_semaphore(&semaphore_create_info, None) }.unwrap())
+                .collect();
+
+            (image_available_semaphores, render_finished_semaphorese)
         };
 
-        let mut skia_context: skia_safe::gpu::DirectContext = skia_safe::gpu::DirectContext::new_vulkan(
-            &skia_backend, None).unwrap();
+        StaticWindowResources {
+            window,
+            surface,
+            command_buffers,
+            command_buffer_fences,
+            image_available_semaphores,
+            render_finished_semaphores,
+            queue_family_index,
+        }
+    }
+}
+
+impl<'a, T> DynamicWindowResources<'a, T> {
+    fn create(vulkan: &VulkanInstance, static_resources: &StaticWindowsResources<'a>, window: &Window) -> DynamicWindowResources<'a, T> {
+        let instance = &vulkan.instance;
+        let physical_device = &static_resources.physical_device;
+        let device = &static_resources.device;
+        let swapchain_loader = &static_resources.swapchain_loader;
+        let surface_loader = &vulkan.surface_loader;
+        let window_dimension = window.inner_size();
+
+        let mut skia_context = static_resources.skia_context.lock().unwrap();
 
         let sample_count = 4;
         let skia_targets: Vec<_> = {
@@ -484,75 +564,89 @@ impl<'a> WindowRenderer<'a> {
                 .collect()
         };
 
-        let (image_available_semaphores, render_finished_semaphores) = {
-            let semaphore_create_info = vk::SemaphoreCreateInfo::default();
-            let image_available_semaphores: Vec<_> = command_buffers.iter()
-                .map(|_command_buffer| unsafe { device.create_semaphore(&semaphore_create_info, None) }.unwrap())
-                .collect();
-            let render_finished_semaphorese: Vec<_> = command_buffers.iter()
-                .map(|_command_buffer| unsafe { device.create_semaphore(&semaphore_create_info, None) }.unwrap())
-                .collect();
+        let window_resources = static_resources.for_window(window);
+        let surface = window_resources.surface;
 
-            (image_available_semaphores, render_finished_semaphorese)
-        };
+        let (swapchain, swapchain_images) = create_swapchain(
+            &instance, &physical_device, &device, &swapchain_loader, &surface_loader, surface, window_dimension.into());
 
         // TODO(knielsen): Construct this in a nicer way
         let command_buffers = (0..MAX_FRAMES_IN_FLIGHT as usize)
             .map(|index| {
                 CommandBufferResources {
-                    command_buffer: command_buffers[index],
-                    available_fence: command_buffer_fences[index],
-                    image_available_semaphore: image_available_semaphores[index],
-                    rendering_finished_semaphore: render_finished_semaphores[index],
+                    command_buffer: window_resources.command_buffers[index],
+                    available_fence: window_resources.command_buffer_fences[index],
+                    image_available_semaphore: window_resources.image_available_semaphores[index],
+                    rendering_finished_semaphore: window_resources.render_finished_semaphores[index],
                     skia_surface: skia_targets[index].0.clone(),
                     skia_image: skia_targets[index].1,
                 }
             })
             .collect();
-
-        WindowRenderer {
-            physical_device,
-            device,
-            present_queue,
+        
+        DynamicWindowResources {
             swapchain,
             swapchain_images,
-            swapchain_loader,
-            
-            command_buffer_index: 0,
+            current_dimensions: window_dimension.into(),
             command_buffers,
 
-            current_dimensions: window_dimension.into(),
+            phantom: PhantomData,
+        }
+    }
+}
 
-            skia_backend,
-            skia_context,
+pub struct WindowRenderer<'a> {
+    command_buffer_index: usize,
+    static_resources: &'a StaticWindowsResources<'a>,
+    static_window_resources: &'a StaticWindowResources<'a>,
+    dynamic_resources: DynamicWindowResources<'a, ()>,
+}
+
+const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+impl<'a> WindowRenderer<'a> {
+    pub fn construct(vulkan: &'a VulkanInstance<'a>, static_resources: &'a StaticWindowsResources<'a>, window: &Window) -> WindowRenderer<'a> {
+        let dynamic_resources = DynamicWindowResources::create(vulkan, static_resources, &window);
+        let static_window_resources = static_resources.for_window(&window);
+
+        WindowRenderer {
+            static_resources,
+            static_window_resources,
+            command_buffer_index: 0,
+            dynamic_resources,
         }
     }
 
     pub fn draw(self: &mut Self, window_dimensions: (u32, u32), user_draw: &dyn Fn(&mut skia_safe::Canvas) -> ()) -> () {
-        if self.current_dimensions != window_dimensions {
+        if self.dynamic_resources.current_dimensions != window_dimensions {
             warn!["Need to re-create swapchain!"];
         }
 
-        let command_buffer_resources = &self.command_buffers[self.command_buffer_index];
+        let device = &self.static_resources.device;
+        let swapchain_loader = &self.static_resources.swapchain_loader;
+        let present_queue = self.static_resources.present_queue;
+        let swapchain = self.dynamic_resources.swapchain;
+        let swapchain_images = &self.dynamic_resources.swapchain_images;
+
+        let command_buffer_resources = &self.dynamic_resources.command_buffers[self.command_buffer_index];
 
         let mut skia_surface = command_buffer_resources.skia_surface.clone();
 
         let (present_index, _) = unsafe {
-            self.swapchain_loader.acquire_next_image(self.swapchain, std::u64::MAX, command_buffer_resources.image_available_semaphore, vk::Fence::null())
+            swapchain_loader.acquire_next_image(swapchain, std::u64::MAX, command_buffer_resources.image_available_semaphore, vk::Fence::null())
         }.unwrap();
-        let image = self.swapchain_images[present_index as usize];
+        let image = swapchain_images[present_index as usize];
 
         unsafe {
             // Wait and reset
-            self.device.wait_for_fences(&[command_buffer_resources.available_fence], true, std::u64::MAX).unwrap();
-            self.device.reset_fences(&[command_buffer_resources.available_fence]).unwrap();
+            device.wait_for_fences(&[command_buffer_resources.available_fence], true, std::u64::MAX).unwrap();
+            device.reset_fences(&[command_buffer_resources.available_fence]).unwrap();
 
-            self.device.reset_command_buffer(command_buffer_resources.command_buffer, vk::CommandBufferResetFlags::RELEASE_RESOURCES).unwrap();
+            device.reset_command_buffer(command_buffer_resources.command_buffer, vk::CommandBufferResetFlags::RELEASE_RESOURCES).unwrap();
             
             // Send commands
             let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
                 .build();
-            self.device.begin_command_buffer(command_buffer_resources.command_buffer, &command_buffer_begin_info).unwrap();
+            device.begin_command_buffer(command_buffer_resources.command_buffer, &command_buffer_begin_info).unwrap();
 
             // Issue Skia draw commands
             let canvas = skia_surface.canvas();
@@ -588,12 +682,12 @@ impl<'a> WindowRenderer<'a> {
                     .build())
                 .build();
 
-            self.device.cmd_pipeline_barrier(command_buffer_resources.command_buffer,
+            device.cmd_pipeline_barrier(command_buffer_resources.command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(), &[], &[], &[skia_barrier, barrier_test]);
             
-            self.device.cmd_copy_image(command_buffer_resources.command_buffer, command_buffer_resources.skia_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            device.cmd_copy_image(command_buffer_resources.command_buffer, command_buffer_resources.skia_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[
                         vk::ImageCopy::builder()
                             .src_offset(vk::Offset3D::default())
@@ -607,8 +701,8 @@ impl<'a> WindowRenderer<'a> {
                                 .layer_count(1)
                                 .build())
                             .extent(vk::Extent3D::builder()
-                                .width(self.current_dimensions.0)
-                                .height(self.current_dimensions.1)
+                                .width(self.dynamic_resources.current_dimensions.0)
+                                .height(self.dynamic_resources.current_dimensions.1)
                                 .depth(1)
                                 .build())
                             .build()
@@ -640,12 +734,12 @@ impl<'a> WindowRenderer<'a> {
                     .build())
                 .build();
 
-            self.device.cmd_pipeline_barrier(command_buffer_resources.command_buffer,
+            device.cmd_pipeline_barrier(command_buffer_resources.command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(), &[], &[], &[barrier, skia_finish_copy_barrier]);
 
-            self.device.end_command_buffer(command_buffer_resources.command_buffer).unwrap();
+            device.end_command_buffer(command_buffer_resources.command_buffer).unwrap();
             
             // Submit
             let submit_info = vk::SubmitInfo::builder()
@@ -656,11 +750,11 @@ impl<'a> WindowRenderer<'a> {
                 .signal_semaphores(&[command_buffer_resources.rendering_finished_semaphore])
                 .build();
             
-            self.device.queue_submit(self.present_queue, &[submit_info], command_buffer_resources.available_fence).unwrap();
+            device.queue_submit(present_queue, &[submit_info], command_buffer_resources.available_fence).unwrap();
         };
 
         let wait_semaphores = [command_buffer_resources.rendering_finished_semaphore];
-        let swapchains = [self.swapchain];
+        let swapchains = [swapchain];
         let image_indices = [present_index];
         let present_info = vk::PresentInfoKHR::builder()
             .wait_semaphores(&wait_semaphores) // &base.rendering_complete_semaphore)
@@ -668,8 +762,8 @@ impl<'a> WindowRenderer<'a> {
             .image_indices(&image_indices)
             .build();
 
-        unsafe { self.swapchain_loader.queue_present(self.present_queue, &present_info) }.unwrap();
+        unsafe { swapchain_loader.queue_present(present_queue, &present_info) }.unwrap();
 
-        self.command_buffer_index = (self.command_buffer_index + 1) % self.command_buffers.len();
+        self.command_buffer_index = (self.command_buffer_index + 1) % self.dynamic_resources.command_buffers.len();
     }
 }
