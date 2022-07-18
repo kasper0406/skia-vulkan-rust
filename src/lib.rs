@@ -378,6 +378,7 @@ impl<'a> VulkanInstance<'a> {
 }
 
 pub struct StaticWindowsResources<'a> {
+    vulkan: &'a VulkanInstance<'a>,
     physical_device: PhysicalDevice,
     device: ash::Device,
     present_queue: ash::vk::Queue,
@@ -424,7 +425,7 @@ impl<'a> StaticWindowsResources<'a> {
 
         let window_resources: std::collections::HashMap<_, _> = std::iter::zip(windows.iter(), surfaces.into_iter())
             .map(|(window, surface)| {
-                let static_window_resources = StaticWindowResources::create(window, &vulkan, &device, queue_family_index as u32, surface);
+                let static_window_resources = StaticWindowResources::create(window, &device, queue_family_index as u32, surface);
                 (window.id(), static_window_resources)
             })
             .collect();
@@ -433,6 +434,8 @@ impl<'a> StaticWindowsResources<'a> {
             &skia_backend, None).unwrap();
 
         StaticWindowsResources {
+            vulkan,
+
             physical_device,
             device,
             present_queue,
@@ -471,7 +474,7 @@ struct DynamicWindowResources<'a, T: 'a> {
 }
 
 impl<'a> StaticWindowResources<'a> {
-    fn create(window: &'a Window, vulkan: &VulkanInstance, device: &ash::Device, queue_family_index: u32, surface: ash::vk::SurfaceKHR) -> StaticWindowResources<'a> {
+    fn create(window: &'a Window, device: &ash::Device, queue_family_index: u32, surface: ash::vk::SurfaceKHR) -> StaticWindowResources<'a> {
         let (command_buffers, command_buffer_fences) = {
             let pool_create_info = vk::CommandPoolCreateInfo::builder()
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
@@ -524,7 +527,8 @@ impl<'a> StaticWindowResources<'a> {
 }
 
 impl<'a, T> DynamicWindowResources<'a, T> {
-    fn create(vulkan: &VulkanInstance, static_resources: &StaticWindowsResources<'a>, window: &Window) -> DynamicWindowResources<'a, T> {
+    fn create(static_resources: &StaticWindowsResources<'a>, window: &Window) -> DynamicWindowResources<'a, T> {
+        let vulkan = static_resources.vulkan;
         let instance = &vulkan.instance;
         let physical_device = &static_resources.physical_device;
         let device = &static_resources.device;
@@ -596,32 +600,40 @@ impl<'a, T> DynamicWindowResources<'a, T> {
 }
 
 pub struct WindowRenderer<'a> {
+    window: &'a Window,
     command_buffer_index: usize,
     static_resources: &'a StaticWindowsResources<'a>,
     static_window_resources: &'a StaticWindowResources<'a>,
     dynamic_resources: DynamicWindowResources<'a, ()>,
+    should_recreate_swapchain: bool,
 }
 
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 impl<'a> WindowRenderer<'a> {
-    pub fn construct(vulkan: &'a VulkanInstance<'a>, static_resources: &'a StaticWindowsResources<'a>, window: &Window) -> WindowRenderer<'a> {
-        let dynamic_resources = DynamicWindowResources::create(vulkan, static_resources, &window);
+    pub fn construct(static_resources: &'a StaticWindowsResources<'a>, window: &'a Window) -> WindowRenderer<'a> {
+        let dynamic_resources = DynamicWindowResources::create(static_resources, &window);
         let static_window_resources = static_resources.for_window(&window);
 
         WindowRenderer {
+            window,
             static_resources,
             static_window_resources,
             command_buffer_index: 0,
             dynamic_resources,
+            should_recreate_swapchain: false,
         }
     }
 
     pub fn draw(self: &mut Self, window_dimensions: (u32, u32), user_draw: &dyn Fn(&mut skia_safe::Canvas) -> ()) -> () {
-        if self.dynamic_resources.current_dimensions != window_dimensions {
-            warn!["Need to re-create swapchain!"];
+        let device = &self.static_resources.device;
+        
+        if self.should_recreate_swapchain || self.dynamic_resources.current_dimensions != window_dimensions {
+            info!["Re-creating the swapchain!"];
+            unsafe { device.device_wait_idle() }.unwrap();
+            self.dynamic_resources = DynamicWindowResources::create(self.static_resources, self.window);
+            self.should_recreate_swapchain = false;
         }
 
-        let device = &self.static_resources.device;
         let swapchain_loader = &self.static_resources.swapchain_loader;
         let present_queue = self.static_resources.present_queue;
         let swapchain = self.dynamic_resources.swapchain;
@@ -631,14 +643,19 @@ impl<'a> WindowRenderer<'a> {
 
         let mut skia_surface = command_buffer_resources.skia_surface.clone();
 
-        let (present_index, _) = unsafe {
+        unsafe {
+            device.wait_for_fences(&[command_buffer_resources.available_fence], true, std::u64::MAX)
+        }.unwrap();
+
+        let (present_index, suboptimal) = unsafe {
             swapchain_loader.acquire_next_image(swapchain, std::u64::MAX, command_buffer_resources.image_available_semaphore, vk::Fence::null())
         }.unwrap();
-        let image = swapchain_images[present_index as usize];
+        if suboptimal {
+            self.should_recreate_swapchain = true;
+            return;
+        }
 
         unsafe {
-            // Wait and reset
-            device.wait_for_fences(&[command_buffer_resources.available_fence], true, std::u64::MAX).unwrap();
             device.reset_fences(&[command_buffer_resources.available_fence]).unwrap();
 
             device.reset_command_buffer(command_buffer_resources.command_buffer, vk::CommandBufferResetFlags::RELEASE_RESOURCES).unwrap();
@@ -669,6 +686,7 @@ impl<'a> WindowRenderer<'a> {
                     .build())
                 .build();
 
+            let image = swapchain_images[present_index as usize];
             let barrier_test = vk::ImageMemoryBarrier::builder()
                 .image(image)
                 .old_layout(vk::ImageLayout::UNDEFINED)

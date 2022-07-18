@@ -24,8 +24,8 @@ fn main() {
 
     let vulkan = skia_vulkan::VulkanInstance::new();
     let static_resources = skia_vulkan::StaticWindowsResources::construct(&vulkan, windows);
-    let mut skia_renderer_1 = skia_vulkan::WindowRenderer::construct(&vulkan, &static_resources, &window1);
-    let mut skia_renderer_2 = skia_vulkan::WindowRenderer::construct(&vulkan, &static_resources, &window2);
+    let skia_renderer_1 = skia_vulkan::WindowRenderer::construct(&static_resources, &window1);
+    let skia_renderer_2 = skia_vulkan::WindowRenderer::construct(&static_resources, &window2);
     let renders = &mut [skia_renderer_1, skia_renderer_2];
 
     let start_time = std::time::Instant::now();
