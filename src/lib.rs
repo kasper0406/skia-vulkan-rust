@@ -430,7 +430,7 @@ impl<'a> StaticWindowsResources<'a> {
             })
             .collect();
 
-        let mut skia_context: skia_safe::gpu::DirectContext = skia_safe::gpu::DirectContext::new_vulkan(
+        let skia_context: skia_safe::gpu::DirectContext = skia_safe::gpu::DirectContext::new_vulkan(
             &skia_backend, None).unwrap();
 
         StaticWindowsResources {
@@ -527,7 +527,7 @@ impl<'a> StaticWindowResources<'a> {
 }
 
 impl<'a, T> DynamicWindowResources<'a, T> {
-    fn create(static_resources: &StaticWindowsResources<'a>, window: &Window) -> DynamicWindowResources<'a, T> {
+    fn create(static_resources: &StaticWindowsResources<'a>, window: &Window, sample_count: usize) -> DynamicWindowResources<'a, T> {
         let vulkan = static_resources.vulkan;
         let instance = &vulkan.instance;
         let physical_device = &static_resources.physical_device;
@@ -538,7 +538,6 @@ impl<'a, T> DynamicWindowResources<'a, T> {
 
         let mut skia_context = static_resources.skia_context.lock().unwrap();
 
-        let sample_count = 4;
         let skia_targets: Vec<_> = {
             let skia_image_info = skia_safe::ImageInfo::new(
                 skia_safe::ISize::new(window_dimension.width as i32, window_dimension.height as i32),
@@ -601,26 +600,33 @@ impl<'a, T> DynamicWindowResources<'a, T> {
 
 pub struct WindowRenderer<'a> {
     window: &'a Window,
-    command_buffer_index: usize,
     static_resources: &'a StaticWindowsResources<'a>,
     static_window_resources: &'a StaticWindowResources<'a>,
     dynamic_resources: DynamicWindowResources<'a, ()>,
+
+    sample_count: usize,
+
     should_recreate_swapchain: bool,
+    command_buffer_index: usize,
 }
 
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 impl<'a> WindowRenderer<'a> {
     pub fn construct(static_resources: &'a StaticWindowsResources<'a>, window: &'a Window) -> WindowRenderer<'a> {
-        let dynamic_resources = DynamicWindowResources::create(static_resources, &window);
+        let sample_count = 8;
+        let dynamic_resources = DynamicWindowResources::create(static_resources, &window, sample_count);
         let static_window_resources = static_resources.for_window(&window);
 
         WindowRenderer {
             window,
             static_resources,
             static_window_resources,
-            command_buffer_index: 0,
             dynamic_resources,
+
+            sample_count,
+
             should_recreate_swapchain: false,
+            command_buffer_index: 0,
         }
     }
 
@@ -630,7 +636,7 @@ impl<'a> WindowRenderer<'a> {
         if self.should_recreate_swapchain || self.dynamic_resources.current_dimensions != window_dimensions {
             info!["Re-creating the swapchain!"];
             unsafe { device.device_wait_idle() }.unwrap();
-            self.dynamic_resources = DynamicWindowResources::create(self.static_resources, self.window);
+            self.dynamic_resources = DynamicWindowResources::create(self.static_resources, self.window, self.sample_count);
             self.should_recreate_swapchain = false;
         }
 
@@ -728,8 +734,12 @@ impl<'a> WindowRenderer<'a> {
 
             let skia_finish_copy_barrier = vk::ImageMemoryBarrier::builder()
                 .image(command_buffer_resources.skia_image)
-                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(if self.sample_count == 1 {
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+                } else {
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                })
                 .src_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .subresource_range(vk::ImageSubresourceRange::builder()
