@@ -3,11 +3,7 @@ use std::sync::Arc;
 use std::ffi::{ CStr, CString };
 use std::sync::Mutex;
 
-use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Window, WindowBuilder};
-
-use skia_safe::gpu::{BackendRenderTarget, DirectContext, SurfaceOrigin};
+use winit::window::Window;
 
 use log::{ info, warn, error };
 
@@ -136,10 +132,7 @@ fn create_device(instance: &ash::Instance, physical_device: &PhysicalDevice, que
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         KhrPortabilitySubsetFn::name().as_ptr(),
     ];
-    let features = vk::PhysicalDeviceFeatures {
-        // shader_clip_distance: 1,
-        ..Default::default()
-    };
+    let features = vk::PhysicalDeviceFeatures::default();
     let priorities = [1.0];
 
     let queue_info = vk::DeviceQueueCreateInfo::builder()
@@ -265,14 +258,11 @@ fn get_required_extensions() -> Vec<*const std::os::raw::c_char> {
     for window_extension in enumerate_required_extensions() {
         extensions.push(window_extension);
     }
-
     extensions
 }
 
 fn create_swapchain(
-    instance: &ash::Instance, 
     physical_device: &PhysicalDevice,
-    device: &ash::Device,
     swapchain_loader: &Swapchain,
     surface_loader: &ash::extensions::khr::Surface,
     surface: vk::SurfaceKHR,
@@ -382,7 +372,6 @@ pub struct StaticWindowsResources<'a> {
     physical_device: PhysicalDevice,
     device: ash::Device,
     present_queue: ash::vk::Queue,
-    queue_family_index: usize,
     swapchain_loader: Swapchain,
 
     // TODO(knielsen): Is there a way to get rid of this mutex?
@@ -435,16 +424,11 @@ impl<'a> StaticWindowsResources<'a> {
 
         StaticWindowsResources {
             vulkan,
-
             physical_device,
             device,
             present_queue,
-
             skia_context: Arc::new(Mutex::new(skia_context)),
-
             window_resources,
-            queue_family_index,
-
             swapchain_loader,
         }
     }
@@ -461,7 +445,6 @@ struct StaticWindowResources<'a> {
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
     surface: ash::vk::SurfaceKHR,
-    queue_family_index: u32,
 }
 
 struct DynamicWindowResources<'a, T: 'a> {
@@ -521,7 +504,6 @@ impl<'a> StaticWindowResources<'a> {
             command_buffer_fences,
             image_available_semaphores,
             render_finished_semaphores,
-            queue_family_index,
         }
     }
 }
@@ -571,7 +553,7 @@ impl<'a, T> DynamicWindowResources<'a, T> {
         let surface = window_resources.surface;
 
         let (swapchain, swapchain_images) = create_swapchain(
-            &instance, &physical_device, &device, &swapchain_loader, &surface_loader, surface, window_dimension.into());
+            &physical_device, &swapchain_loader, &surface_loader, surface, window_dimension.into());
 
         // TODO(knielsen): Construct this in a nicer way
         let command_buffers = (0..MAX_FRAMES_IN_FLIGHT as usize)
@@ -661,6 +643,13 @@ impl<'a> WindowRenderer<'a> {
             return;
         }
 
+        let image = swapchain_images[present_index as usize];
+        let subresource_range = vk::ImageSubresourceRange::builder()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1)
+            .build();
+
         unsafe {
             device.reset_fences(&[command_buffer_resources.available_fence]).unwrap();
 
@@ -679,37 +668,28 @@ impl<'a> WindowRenderer<'a> {
 
             skia_surface.flush_and_submit();
 
-            let skia_barrier = vk::ImageMemoryBarrier::builder()
+            let skia_image_to_transfer_src = vk::ImageMemoryBarrier::builder()
                 .image(command_buffer_resources.skia_image)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                 .src_access_mask(vk::AccessFlags::NONE)
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                .subresource_range(vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .level_count(1)
-                    .layer_count(1)
-                    .build())
+                .subresource_range(subresource_range)
                 .build();
 
-            let image = swapchain_images[present_index as usize];
-            let barrier_test = vk::ImageMemoryBarrier::builder()
+            let swapchain_image_to_transfer_dst = vk::ImageMemoryBarrier::builder()
                 .image(image)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .src_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .subresource_range(vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .level_count(1)
-                    .layer_count(1)
-                    .build())
+                .subresource_range(subresource_range)
                 .build();
 
             device.cmd_pipeline_barrier(command_buffer_resources.command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(), &[], &[], &[skia_barrier, barrier_test]);
+                vk::DependencyFlags::empty(), &[], &[], &[skia_image_to_transfer_src, swapchain_image_to_transfer_dst]);
             
             device.cmd_copy_image(command_buffer_resources.command_buffer, command_buffer_resources.skia_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[
@@ -732,7 +712,7 @@ impl<'a> WindowRenderer<'a> {
                             .build()
                     ]);
 
-            let skia_finish_copy_barrier = vk::ImageMemoryBarrier::builder()
+            let skia_image_to_transfer_dst = vk::ImageMemoryBarrier::builder()
                 .image(command_buffer_resources.skia_image)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(if self.sample_count == 1 {
@@ -742,42 +722,32 @@ impl<'a> WindowRenderer<'a> {
                 })
                 .src_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                .subresource_range(vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .level_count(1)
-                    .layer_count(1)
-                    .build())
+                .subresource_range(subresource_range)
                 .build();
 
-            let barrier = vk::ImageMemoryBarrier::builder()
+            let swapchain_image_to_present = vk::ImageMemoryBarrier::builder()
                 .image(image)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                 .src_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                .subresource_range(vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .level_count(1)
-                    .layer_count(1)
-                    .build())
+                .subresource_range(subresource_range)
                 .build();
 
             device.cmd_pipeline_barrier(command_buffer_resources.command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(), &[], &[], &[barrier, skia_finish_copy_barrier]);
+                vk::DependencyFlags::empty(), &[], &[], &[skia_image_to_transfer_dst, swapchain_image_to_present]);
 
             device.end_command_buffer(command_buffer_resources.command_buffer).unwrap();
             
             // Submit
             let submit_info = vk::SubmitInfo::builder()
                 .wait_semaphores(&[command_buffer_resources.image_available_semaphore])
-                // .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
                 .wait_dst_stage_mask(&[vk::PipelineStageFlags::TRANSFER])
                 .command_buffers(&[command_buffer_resources.command_buffer])
                 .signal_semaphores(&[command_buffer_resources.rendering_finished_semaphore])
                 .build();
-            
             device.queue_submit(present_queue, &[submit_info], command_buffer_resources.available_fence).unwrap();
         };
 
