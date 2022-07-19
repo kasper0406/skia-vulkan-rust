@@ -595,7 +595,7 @@ pub struct WindowRenderer<'a> {
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 impl<'a> WindowRenderer<'a> {
     pub fn construct(static_resources: &'a StaticWindowsResources<'a>, window: &'a Window) -> WindowRenderer<'a> {
-        let sample_count = 8;
+        let sample_count = 4;
         let dynamic_resources = DynamicWindowResources::create(static_resources, &window, sample_count);
         let static_window_resources = static_resources.for_window(&window);
 
