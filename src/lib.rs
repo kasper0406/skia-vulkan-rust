@@ -238,7 +238,7 @@ pub fn enumerate_required_extensions() -> Vec<*const std::os::raw::c_char> {
             const MACOS_EXTS: [*const std::os::raw::c_char; 3] = [
                 ash::extensions::khr::Surface::name().as_ptr(),
                 ash::extensions::ext::MetalSurface::name().as_ptr(),
-                KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
+                ash::vk::KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
             ];
             MACOS_EXTS.to_vec()
         },
@@ -246,7 +246,7 @@ pub fn enumerate_required_extensions() -> Vec<*const std::os::raw::c_char> {
             const IOS_EXTS: [*const std::os::raw::c_char; 3] = [
                 ash::extensions::khr::Surface::name().as_ptr(),
                 ash::extensions::ext::MetalSurface::name().as_ptr(),
-                KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
+                ash::vk::KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
             ];
             IOS_EXTS.to_vec()
         }
