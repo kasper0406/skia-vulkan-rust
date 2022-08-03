@@ -20,12 +20,12 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let windows = &[&window1, &window2];
+    let windows = vec![window1, window2];
 
     let vulkan = skia_vulkan::VulkanInstance::new();
-    let static_resources = skia_vulkan::StaticWindowsResources::construct(&vulkan, windows);
-    let skia_renderer_1 = skia_vulkan::WindowRenderer::construct(&static_resources, &window1);
-    let skia_renderer_2 = skia_vulkan::WindowRenderer::construct(&static_resources, &window2);
+    let static_resources = skia_vulkan::StaticWindowsResources::construct(&vulkan, &windows);
+    let skia_renderer_1 = skia_vulkan::WindowRenderer::construct(&static_resources, &windows[0]);
+    let skia_renderer_2 = skia_vulkan::WindowRenderer::construct(&static_resources, &windows[1]);
     let renders = &mut [skia_renderer_1, skia_renderer_2];
 
     let start_time = std::time::Instant::now();
@@ -52,15 +52,14 @@ fn main() {
                     frame_counter = 0;
                 }
 
-                window1.request_redraw();
-                window2.request_redraw();
+                windows.iter().for_each(|window| window.request_redraw());
             },
             winit::event::Event::RedrawRequested(window_id) => {
-                let (window, renderer) = std::iter::zip(windows, renders.iter_mut())
+                let (window, renderer) = std::iter::zip(windows.iter(), renders.iter_mut())
                     .find(|(window, _renderer)| window.id() == window_id)
                     .unwrap();
 
-                renderer.draw(window.inner_size().into(), &|canvas: &mut skia_safe::Canvas| {
+                renderer.draw(window.inner_size().into(), &mut |canvas: &mut skia_safe::Canvas| {
                     canvas.clear(skia_safe::Color4f::new(1.0, 1.0, 1.0, 1.0));
                     let paint = skia_safe::Paint::new(skia_safe::Color4f::new(1.0, 0.0, 0.0, 1.0), None);
 

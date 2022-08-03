@@ -1,3 +1,6 @@
+pub use skia_safe;
+pub use winit;
+
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::ffi::{ CStr, CString };
@@ -382,7 +385,7 @@ pub struct StaticWindowsResources<'a> {
 }
 
 impl<'a> StaticWindowsResources<'a> {
-    pub fn construct(vulkan: &'a VulkanInstance<'a>, windows: &'a [&Window]) -> StaticWindowsResources<'a> {
+    pub fn construct(vulkan: &'a VulkanInstance<'a>, windows: &'a [Window]) -> StaticWindowsResources<'a> {
         let vulkan_entry = vulkan.vulkan_entry.clone();
         let instance = vulkan.instance.clone();
 
@@ -612,7 +615,7 @@ impl<'a> WindowRenderer<'a> {
         }
     }
 
-    pub fn draw(self: &mut Self, window_dimensions: (u32, u32), user_draw: &dyn Fn(&mut skia_safe::Canvas) -> ()) -> () {
+    pub fn draw(self: &mut Self, window_dimensions: (u32, u32), user_draw: &mut dyn FnMut(&mut skia_safe::Canvas) -> ()) -> () {
         let device = &self.static_resources.device;
         
         if self.should_recreate_swapchain || self.dynamic_resources.current_dimensions != window_dimensions {

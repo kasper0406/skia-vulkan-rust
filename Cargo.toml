@@ -13,10 +13,10 @@ test = false
 bench = false
 
 [dependencies]
-skia-safe = { version = "0", features = ["vulkan"] }
-winit = "0"
+skia-safe = { version = "0", features = ["vulkan", "textlayout"] }
+winit = "0.26"
 log = "0"
 env_logger = "0"
 itertools = "0"
-ash = "0"
-ash-window = "0"
+ash = "0.37"
+ash-window = "0.10"
