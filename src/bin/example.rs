@@ -22,10 +22,12 @@ fn main() {
 
     let windows = vec![window1, window2];
 
+    let renderer_config = skia_vulkan::WindowRendererConfigBuilder::default().build().unwrap();
+
     let vulkan = skia_vulkan::VulkanInstance::new();
     let static_resources = skia_vulkan::StaticWindowsResources::construct(&vulkan, &windows);
-    let skia_renderer_1 = skia_vulkan::WindowRenderer::construct(&static_resources, &windows[0]);
-    let skia_renderer_2 = skia_vulkan::WindowRenderer::construct(&static_resources, &windows[1]);
+    let skia_renderer_1 = skia_vulkan::WindowRenderer::construct(&static_resources, &windows[0], renderer_config);
+    let skia_renderer_2 = skia_vulkan::WindowRenderer::construct(&static_resources, &windows[1], renderer_config);
     let renders = &mut [skia_renderer_1, skia_renderer_2];
 
     let start_time = std::time::Instant::now();

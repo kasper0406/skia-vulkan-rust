@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate derive_builder;
+
 pub use skia_safe;
 pub use winit;
 
@@ -8,7 +11,7 @@ use std::sync::Mutex;
 
 use winit::window::Window;
 
-use log::{ info, warn, error };
+use log::{ debug, info, error };
 
 use ash::extensions::{
     ext::DebugUtils,
@@ -48,18 +51,6 @@ fn get_image_from_skia_texture(texture: &skia_safe::gpu::BackendTexture) -> vk::
 }
 
 fn create_instance(application_name: String, extensions: &[*const std::os::raw::c_char], entry: &ash::Entry) -> VkResult<ash::Instance> {
-    // TODO(knielsen): Support custom extensions
-    /*
-    let enabled_extensions_cstr: Vec<CString> = vec![
-        "VK_KHR_surface",
-        "VK_MVK_macos_surface",
-        "VK_KHR_get_physical_device_properties2",
-        "VK_KHR_get_surface_capabilities2"
-    ].into_iter().map(|extension_name| CString::new(extension_name).unwrap()).collect();
-    let enabled_extensions_cstr_raw: Vec<*const std::os::raw::c_char> = enabled_extensions_cstr.iter()
-            .map(|cstr| cstr.as_ptr())
-            .collect(); */
-
     let enabled_layer_names: Vec<*const std::os::raw::c_char> = vec![];
 
     let application_name_cstr = CString::new(application_name.clone()).unwrap();
@@ -269,17 +260,19 @@ fn create_swapchain(
     swapchain_loader: &Swapchain,
     surface_loader: &ash::extensions::khr::Surface,
     surface: vk::SurfaceKHR,
-    window_dimensions: (i32, i32)) -> (vk::SwapchainKHR, Vec<vk::Image>)
+    window_dimensions: (i32, i32),
+    desired_present_mode: vk::PresentModeKHR) -> (vk::SwapchainKHR, Vec<vk::Image>,)
 {
     unsafe {
         let present_modes = surface_loader
             .get_physical_device_surface_present_modes(physical_device.handle, surface)
             .unwrap();
-        let present_mode = present_modes
+        let selected_present_mode = present_modes
             .iter()
             .cloned()
-            .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
+            .find(|&mode| mode == desired_present_mode)
             .unwrap_or(vk::PresentModeKHR::FIFO);
+        debug!["Selected present mode {:?}", selected_present_mode];
 
         // TODO(knielsen): Query this dynamically
         let desired_image_count = 2;
@@ -309,7 +302,7 @@ fn create_swapchain(
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(present_mode)
+            .present_mode(selected_present_mode)
             .clipped(true)
             .image_array_layers(1)
             .build();
@@ -512,7 +505,7 @@ impl<'a> StaticWindowResources<'a> {
 }
 
 impl<'a, T> DynamicWindowResources<'a, T> {
-    fn create(static_resources: &StaticWindowsResources<'a>, window: &Window, sample_count: usize) -> DynamicWindowResources<'a, T> {
+    fn create(static_resources: &StaticWindowsResources<'a>, window: &Window, config: WindowRendererConfig) -> DynamicWindowResources<'a, T> {
         let vulkan = static_resources.vulkan;
         let instance = &vulkan.instance;
         let physical_device = &static_resources.physical_device;
@@ -536,7 +529,7 @@ impl<'a, T> DynamicWindowResources<'a, T> {
                         &mut skia_context,
                         skia_safe::Budgeted::Yes,
                         &skia_image_info,
-                        Some(sample_count),
+                        Some(config.sample_count),
                         skia_safe::gpu::SurfaceOrigin::TopLeft,
                         None, // Surface props
                         false
@@ -556,7 +549,7 @@ impl<'a, T> DynamicWindowResources<'a, T> {
         let surface = window_resources.surface;
 
         let (swapchain, swapchain_images) = create_swapchain(
-            &physical_device, &swapchain_loader, &surface_loader, surface, window_dimension.into());
+            &physical_device, &swapchain_loader, &surface_loader, surface, window_dimension.into(), config.present_mode);
 
         // TODO(knielsen): Construct this in a nicer way
         let command_buffers = (0..MAX_FRAMES_IN_FLIGHT as usize)
@@ -583,13 +576,22 @@ impl<'a, T> DynamicWindowResources<'a, T> {
     }
 }
 
+#[derive(Builder, PartialEq, Debug, Clone, Copy)]
+pub struct WindowRendererConfig {
+    #[builder(default = "4")]
+    sample_count: usize,
+    
+    #[builder(default = "vk::PresentModeKHR::FIFO")]
+    present_mode: vk::PresentModeKHR,
+}
+
 pub struct WindowRenderer<'a> {
     window: &'a Window,
     static_resources: &'a StaticWindowsResources<'a>,
     static_window_resources: &'a StaticWindowResources<'a>,
     dynamic_resources: DynamicWindowResources<'a, ()>,
 
-    sample_count: usize,
+    renderer_config: WindowRendererConfig,
 
     should_recreate_swapchain: bool,
     command_buffer_index: usize,
@@ -597,9 +599,8 @@ pub struct WindowRenderer<'a> {
 
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 impl<'a> WindowRenderer<'a> {
-    pub fn construct(static_resources: &'a StaticWindowsResources<'a>, window: &'a Window) -> WindowRenderer<'a> {
-        let sample_count = 4;
-        let dynamic_resources = DynamicWindowResources::create(static_resources, &window, sample_count);
+    pub fn construct(static_resources: &'a StaticWindowsResources<'a>, window: &'a Window, renderer_config: WindowRendererConfig) -> WindowRenderer<'a> {
+        let dynamic_resources = DynamicWindowResources::create(static_resources, &window, renderer_config);
         let static_window_resources = static_resources.for_window(&window);
 
         WindowRenderer {
@@ -608,7 +609,7 @@ impl<'a> WindowRenderer<'a> {
             static_window_resources,
             dynamic_resources,
 
-            sample_count,
+            renderer_config,
 
             should_recreate_swapchain: false,
             command_buffer_index: 0,
@@ -621,7 +622,7 @@ impl<'a> WindowRenderer<'a> {
         if self.should_recreate_swapchain || self.dynamic_resources.current_dimensions != window_dimensions {
             info!["Re-creating the swapchain!"];
             unsafe { device.device_wait_idle() }.unwrap();
-            self.dynamic_resources = DynamicWindowResources::create(self.static_resources, self.window, self.sample_count);
+            self.dynamic_resources = DynamicWindowResources::create(self.static_resources, self.window, self.renderer_config);
             self.should_recreate_swapchain = false;
         }
 
@@ -718,7 +719,7 @@ impl<'a> WindowRenderer<'a> {
             let skia_image_to_transfer_dst = vk::ImageMemoryBarrier::builder()
                 .image(command_buffer_resources.skia_image)
                 .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(if self.sample_count == 1 {
+                .new_layout(if self.renderer_config.sample_count == 1 {
                     vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
                 } else {
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL
